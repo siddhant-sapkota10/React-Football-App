@@ -24,7 +24,7 @@ export default function App() {
           <span className="text-green-500 text-4xl font-extrabold underline underline-offset-4">
             OFFICIAL
           </span>
-          <button className="mt-8 px-6 py-2 rounded-full bg-green-600 hover:bg-green-500 font-semibold">
+          <button onClick={() => navigate("/official/login")} className="mt-8 px-6 py-2 rounded-full bg-green-600 hover:bg-green-500 font-semibold">
             Continue
           </button>
         </div>

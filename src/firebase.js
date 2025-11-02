@@ -1,5 +1,6 @@
 // src/firebase.js
 import { initializeApp } from "firebase/app";
+import { getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
@@ -11,7 +12,12 @@ const firebaseConfig = {
   appId: import.meta.env.VITE_FIREBASE_APP_ID,
   measurementId: import.meta.env.VITE_FIREBASE_MEASUREMENT_ID,
 };
+console.log("CFG", {
+  apiKey: (firebaseConfig.apiKey || "").slice(0, 39), // should match Firebase console up to ...V_
+  file: import.meta.url,
+});
 
 const app = initializeApp(firebaseConfig);
 
+export const auth = getAuth(app);
 export const db = getFirestore(app);
