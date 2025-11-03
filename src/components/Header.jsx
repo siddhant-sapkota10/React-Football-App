@@ -1,11 +1,18 @@
+// src/components/Header.jsx
+import { useNavigate } from "react-router-dom";
+
 export default function Header() {
+  const navigate = useNavigate();
+
   return (
-    <header className="w-full bg-slate-900/80 backdrop-blur-sm border-b border-slate-700 py-4 fixed top-0 left-0 z-50">
-      <div className="max-w-6xl mx-auto flex justify-center">
-        <h1 className="text-4xl font-extrabold tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-blue-500 via-cyan-400 to-green-400 drop-shadow-lg">
-          SAPKOTIX
-        </h1>
+    <div className="sticky top-0 z-50 bg-[#0b0f17]/90 backdrop-blur-md border-b border-[#00f6a3]/10">
+      <div className="max-w-6xl mx-auto px-4">
+        <div className="py-3 flex justify-center items-center w-full text-center">
+          <h1 className="sapko-gradient text-2xl md:text-3xl font-extrabold select-none">
+            SAPKOTIX
+          </h1>
+        </div>
       </div>
-    </header>
-  )
+    </div>
+  );
 }

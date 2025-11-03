@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+// src/pages/Official/OfficialHomePage.jsx
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   collection,
   doc,
@@ -12,299 +13,267 @@ import {
 import { db, auth } from "../../firebase";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 
-/* ---------------------------- CONFIG ---------------------------- */
-const GROUP_ID = "groupA-2025"; // change if your group document id differs
+/* ---------- config ---------- */
+const GROUP_ID = "groupA-2025";
 
-/* --------------------------- HELPERS ---------------------------- */
+/* ---------- helpers ---------- */
 const norm = (s) => (s ? String(s).trim().toLowerCase() : "");
 const cap = (s) =>
   typeof s === "string" && s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
+const asDate = (d, t) =>
+  new Date(`${String(d || "9999-12-31")}T${String(t || "23:59")}:00`);
+const sortByDateTime = (arr = []) =>
+  (Array.isArray(arr) ? [...arr] : []).sort(
+    (a, b) => asDate(a?.date, a?.time) - asDate(b?.date, b?.time)
+  );
 const firstDefined = (...xs) =>
-  xs.find((x) => x !== undefined && x !== null && x !== "");
-
-// Build a sortable Date from YYYY-MM-DD and HH:mm (tolerant fallback)
-const asDate = (d, t) => {
-  const safe = `${String(d || "9999-12-31")} ${String(t || "23:59")}`;
-  const dt = new Date(safe.replace(" ", "T"));
-  return Number.isNaN(+dt) ? new Date("9999-12-31T23:59") : dt;
+  xs.find((x) => x !== undefined && x !== null && String(x).trim() !== "");
+const sanitizeUrl = (u) => {
+  if (!u || typeof u !== "string") return "";
+  const raw = u.trim();
+  try {
+    const url = new URL(raw, window.location.origin);
+    if (/drive\.google\.com/i.test(url.hostname)) {
+      const id = raw.match(/\/file\/d\/([^/]+)/)?.[1] || url.searchParams.get("id");
+      if (id) return `https://drive.google.com/uc?export=view&id=${id}`;
+    }
+  } catch {}
+  if (raw.startsWith("//")) return `https:${raw}`;
+  if (raw.startsWith("http://")) return raw.replace(/^http:\/\//, "https://");
+  return raw;
 };
 
-// stable chronological sort (earliest → latest)
-const sortByDateTime = (arr) =>
-  [...arr].sort((a, b) => asDate(a.date, a.time) - asDate(b.date, b.time));
-
+/* ---------- small subcomponents ---------- */
 const Pin = (props) => (
-  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" {...props}>
-    <path d="M12 2a7 7 0 0 0-7 7c0 5.25 7 13 7 13s7-7.75 7-13a7 7 0 0 0-7-7Zm0 9.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5Z"/>
+  <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" {...props}>
+    <path d="M12 2a7 7 0 0 0-7 7c0 5.25 7 13 7 13s7-7.75 7-13a7 7 0 0 0-7-7Zm0 9.5a2.5 2.5 0 1 1 0-5 2.5 2.5 0 0 1 0 5Z" />
   </svg>
 );
 
-/* --------------------------- PAGE ------------------------------ */
+function Initials({ name }) {
+  const letters = (name || "")
+    .split(" ")
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((w) => w[0]?.toUpperCase())
+    .join("");
+  return (
+    <div className="w-9 h-9 md:w-10 md:h-10 rounded-full bg-[#14202f]/70 ring-1 ring-[#00f6a3]/20 flex items-center justify-center text-xs md:text-sm font-semibold text-emerald-300">
+      {letters || "?"}
+    </div>
+  );
+}
+
+function Team({ name, logoURL, align = "left" }) {
+  const Img = () =>
+    logoURL ? (
+      <img
+        src={logoURL}
+        alt={name}
+        className="w-9 h-9 md:w-10 md:h-10 rounded-full object-contain bg-[#101822]/60 ring-1 ring-[#00d0ff]/20 shrink-0"
+        loading="lazy"
+        onError={(e) => (e.currentTarget.style.display = "none")}
+      />
+    ) : null;
+  const Fallback = () => (
+    <div data-fallback="true" style={{ display: logoURL ? "none" : "flex" }}>
+      <Initials name={name} />
+    </div>
+  );
+  return (
+    <div
+      className={`min-w-0 inline-flex items-center gap-3 ${
+        align === "right" ? "justify-end text-right" : ""
+      }`}
+    >
+      {align !== "right" && (
+        <>
+          <Img />
+          <Fallback />
+        </>
+      )}
+      <div className="font-semibold truncate text-slate-100 max-w-[180px] sm:max-w-[240px] md:max-w-[320px]">
+        {name}
+      </div>
+      {align === "right" && (
+        <>
+          <Img />
+          <Fallback />
+        </>
+      )}
+    </div>
+  );
+}
+
+/* ---------- main page ---------- */
 export default function OfficialHomePage() {
-  const [user, setUser] = useState(null);
-
+  const [clubMap, setClubMap] = useState({});
   const [fixtures, setFixtures] = useState([]);
-  const [clubsById, setClubsById] = useState({});
-  const [venueOptions, setVenueOptions] = useState([]); // from groups/{GROUP_ID}.venues
+  const [venues, setVenues] = useState([]);
+  const [modal, setModal] = useState({ open: false });
+  const [details, setDetails] = useState({ open: false });
+  const scoreARef = useRef(null);
 
-  // modal
-  const [modal, setModal] = useState({
-    open: false,
-    fixture: null,
-    mode: "confirm", // 'confirm' | 'edit' | 'venue'
-    scoreA: "",
-    scoreB: "",
-    venue: "",           // text value used when mode==='venue' && selectedVenue === 'other'
-    selectedVenue: "",   // one of venueOptions OR 'other'
-  });
-
-  /* ---- auth guard ---- */
+  /* auth guard */
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, (u) => {
       if (!u) window.location.href = "/";
-      else setUser(u);
     });
     return () => unsub();
   }, []);
 
-  /* ---- group venues ---- */
+  /* clubs */
   useEffect(() => {
     (async () => {
-      try {
-        const snap = await getDoc(doc(db, "groups", GROUP_ID));
-        const data = snap.exists() ? snap.data() : {};
-        const arr = Array.isArray(data.venues) ? data.venues : [];
-        // Keep unique, stable order
-        const unique = [...new Set(arr.map((v) => String(v || "").trim()))].filter(Boolean);
-        setVenueOptions(unique);
-      } catch (e) {
-        console.warn("Failed to load group venues:", e);
-        setVenueOptions([]);
-      }
-    })();
-  }, []);
-
-  /* ---- clubs ---- */
-  useEffect(() => {
-    (async () => {
-      try {
-        const snap = await getDocs(collection(db, "clubs"));
-        const map = {};
-        for (const d of snap.docs) {
-          const c = d.data();
-          const logo =
-            firstDefined(
-              c.logoURL,
-              c.LogoURL,
-              c.logoUrl,
-              c.LogoUrl,
-              c.logo,
-              c.crest
-            ) || "";
-          map[norm(d.id)] = {
-            id: norm(d.id),
-            name: c.name ?? cap(d.id),
-            logoURL: logo,
-          };
-        }
-        setClubsById(map);
-      } catch (e) {
-        console.warn("Failed to load clubs:", e);
-      }
-    })();
-  }, []);
-
-  /* ---- fixtures (root, then fallback to groups/{GROUP_ID}/fixtures) ---- */
-  useEffect(() => {
-    let cleanup = () => {};
-    let triedFallback = false;
-
-    const listenAt = (path) => {
-      const qy = query(collection(db, ...path), orderBy("roundNumber", "asc"));
-      return onSnapshot(
-        qy,
-        (snap) => {
-          const list = snap.docs.map((d) => ({
-            id: d.id,
-            ...d.data(),
-            _path: [...path, d.id],
-          }));
-          setFixtures(list);
-        },
-        (err) => {
-          console.error(`[fixtures error @/${path.join("/")}]`, err);
-          if (!triedFallback) {
-            triedFallback = true;
-            cleanup = listenAt(["groups", GROUP_ID, "fixtures"]);
-          } else {
-            setFixtures([]);
-          }
-        }
+      const snap = await getDocs(collection(db, "clubs"));
+      const list = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const map = Object.fromEntries(
+        list.map((c) => {
+          const rawLogo = firstDefined(
+            c.logoURL,
+            c.LogoURL,
+            c.logoUrl,
+            c.LogoUrl,
+            c.logo,
+            c.badge
+          );
+          return [
+            norm(c.id),
+            {
+              id: norm(c.id),
+              name: c.name ?? c.id,
+              logoURL: sanitizeUrl(rawLogo),
+            },
+          ];
+        })
       );
-    };
-
-    cleanup = listenAt(["fixtures"]);
-    const timer = setTimeout(() => {
-      if (!triedFallback && fixtures.length === 0) {
-        triedFallback = true;
-        cleanup();
-        cleanup = listenAt(["groups", GROUP_ID, "fixtures"]);
-      }
-    }, 600);
-
-    return () => {
-      clearTimeout(timer);
-      cleanup && cleanup();
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+      setClubMap(map);
+    })();
   }, []);
 
-  const clubName = (id) => clubsById[norm(id)]?.name ?? cap(id ?? "");
-  const clubLogo = (id) => clubsById[norm(id)]?.logoURL ?? "";
+  /* fixtures listener */
+  useEffect(() => {
+    const qy = query(
+      collection(db, `groups/${GROUP_ID}/fixtures`),
+      orderBy("roundNumber", "asc")
+    );
+    const unsub = onSnapshot(qy, (snap) => {
+      const raw = snap.docs.map((d) => ({
+        id: d.id,
+        ...d.data(),
+        _path: ["groups", GROUP_ID, "fixtures", d.id],
+      }));
+      setFixtures(sortByDateTime(raw));
+    });
+    return () => unsub();
+  }, []);
 
-  const isScored = (f) =>
-    Number.isFinite(f?.scoreA) && Number.isFinite(f?.scoreB);
+  /* venues */
+  useEffect(() => {
+    (async () => {
+      const g = await getDoc(doc(db, "groups", GROUP_ID));
+      const list = Array.isArray(g.data()?.venues) ? g.data().venues : [];
+      if (list.length) setVenues(list);
+    })();
+  }, []);
 
-  const upcoming = useMemo(() => fixtures.filter((f) => !isScored(f)), [fixtures]);
-  const past = useMemo(() => fixtures.filter(isScored), [fixtures]);
+  const hasScores = (f) => Number.isFinite(f?.scoreA) && Number.isFinite(f?.scoreB);
+  const needsScore = (f) =>
+    (f?.status === "finished" || f?.status === "completed") && !hasScores(f);
 
-  // Group an array of fixtures by round and sort rounds asc + fixtures by datetime
+  const upcoming = useMemo(() => fixtures.filter((f) => !hasScores(f)), [fixtures]);
+  const past = useMemo(() => fixtures.filter(hasScores), [fixtures]);
+
   const groupByRound = (arr) => {
-    const map = new Map();
-    arr.forEach((f) => {
+    const byRound = new Map();
+    for (const f of arr) {
       const key = f.roundNumber ?? "—";
-      if (!map.has(key)) map.set(key, []);
-      map.get(key).push(f);
-    });
-    for (const [k, list] of map) map.set(k, sortByDateTime(list));
-    return [...map.entries()].sort((a, b) => Number(a[0]) - Number(b[0]));
+      const list = byRound.get(key) ?? [];
+      list.push(f);
+      byRound.set(key, sortByDateTime(list));
+    }
+    return byRound;
   };
 
-  const upcomingByRound = useMemo(() => groupByRound(upcoming), [upcoming]);
-  const pastByRound = useMemo(() => groupByRound(past), [past]);
+  const upGrouped = useMemo(() => groupByRound(upcoming), [upcoming]);
+  const pastGrouped = useMemo(() => groupByRound(past), [past]);
+  const upRoundKeys = useMemo(
+    () => [...upGrouped.keys()].sort((a, b) => Number(a) - Number(b)),
+    [upGrouped]
+  );
+  const pastRoundKeys = useMemo(
+    () => [...pastGrouped.keys()].sort((a, b) => Number(a) - Number(b)),
+    [pastGrouped]
+  );
 
-  /* ---- modal helpers ---- */
-  const openConfirm = (fixture) =>
-    setModal({
-      open: true,
-      fixture,
-      mode: "confirm",
-      scoreA: fixture.scoreA ?? "",
-      scoreB: fixture.scoreB ?? "",
-      selectedVenue: "",
-      venue: fixture.venue ?? fixture.ground ?? "",
-    });
-
+  /* helpers */
+  const clubName = (id) => clubMap[norm(id)]?.name ?? cap(id ?? "");
   const openEdit = (fixture) =>
-    setModal({
-      open: true,
-      fixture,
-      mode: "edit",
-      scoreA: fixture.scoreA ?? "",
-      scoreB: fixture.scoreB ?? "",
-      selectedVenue: "",
-      venue: fixture.venue ?? fixture.ground ?? "",
-    });
+    setModal({ open: true, fixture, mode: "edit", scoreA: fixture.scoreA ?? "", scoreB: fixture.scoreB ?? "" });
+  const openConfirm = (fixture) =>
+    setModal({ open: true, fixture, mode: "confirm", scoreA: fixture.scoreA ?? "", scoreB: fixture.scoreB ?? "" });
+  const closeModal = () => setModal({ open: false });
 
-  const openVenue = (fixture) => {
-    const currentVenue = String(firstDefined(fixture.venue, fixture.ground, "")).trim();
-    const isListed = venueOptions.includes(currentVenue);
-    setModal({
-      open: true,
-      fixture,
-      mode: "venue",
-      scoreA: fixture.scoreA ?? "",
-      scoreB: fixture.scoreB ?? "",
-      selectedVenue: isListed ? currentVenue : "other",
-      venue: isListed ? "" : currentVenue, // if not listed, prefill text input
-    });
-  };
-
-  const closeModal = () => setModal((m) => ({ ...m, open: false }));
-
-  /* ---- save back: scores ---- */
   const saveScores = async () => {
     const { fixture, scoreA, scoreB } = modal;
-    if (!fixture || !Array.isArray(fixture._path)) return;
-    const a = Number(scoreA);
-    const b = Number(scoreB);
-    if (!Number.isInteger(a) || !Number.isInteger(b) || a < 0 || b < 0) return;
-    try {
-      await updateDoc(doc(db, ...fixture._path), {
-        scoreA: a,
-        scoreB: b,
-        status: "finished",
-      });
-      closeModal();
-    } catch (err) {
-      console.error("Failed to update fixture:", fixture._path, err);
-      alert("Could not save score (check Firestore rules). See console for details.");
-    }
+    if (!fixture) return;
+    const a = Number(scoreA), b = Number(scoreB);
+    if (!Number.isInteger(a) || !Number.isInteger(b)) return;
+    await updateDoc(doc(db, ...fixture._path), {
+      scoreA: a,
+      scoreB: b,
+      status: "finished",
+    });
+    closeModal();
   };
 
-  /* ---- save back: venue with double-booking guard ---- */
-  const saveVenue = async () => {
-    const { fixture, selectedVenue, venue } = modal;
-    if (!fixture || !Array.isArray(fixture._path)) return;
+  /* details modal logic */
+  const openDetails = (fixture) =>
+    setDetails({
+      open: true,
+      fixture,
+      date: fixture.date || "",
+      time: fixture.time || "",
+      status: String(fixture.status || "scheduled").toLowerCase(),
+      chosenVenue: fixture.venue || "",
+      customVenue: "",
+    });
+  const closeDetails = () => setDetails({ open: false });
 
-    // Decide final venue string
-    const finalVenue =
-      selectedVenue === "other"
-        ? String(venue || "").trim()
-        : String(selectedVenue || "").trim();
-
-    if (!finalVenue) {
-      alert("Please choose a venue or enter one.");
-      return;
-    }
-
-    // Compute "used on this date" set (excluding current fixture)
-    const usedOnDate = new Set(
-      fixtures
-        .filter((f) => f.date === fixture.date && f.id !== fixture.id)
-        .map((f) => String(firstDefined(f.venue, f.ground, "")).trim())
-        .filter(Boolean)
-    );
-
-    // If finalVenue is already used that day -> block
-    if (usedOnDate.has(finalVenue)) {
-      alert(`“${finalVenue}” is already booked on ${fixture.date}. Please choose another venue.`);
-      return;
-    }
-
-    try {
-      await updateDoc(doc(db, ...fixture._path), { venue: finalVenue });
-      closeModal();
-    } catch (err) {
-      console.error("Failed to update venue:", fixture._path, err);
-      alert("Could not update venue (check Firestore rules). See console for details.");
-    }
+  const saveDetails = async () => {
+    const f = details.fixture;
+    if (!f) return;
+    const date = String(details.date || "").trim();
+    const time = String(details.time || "").trim();
+    const status = String(details.status || "scheduled").toLowerCase();
+    const venueValue =
+      details.chosenVenue === "___OTHER___"
+        ? (details.customVenue || "").trim()
+        : (details.chosenVenue || "").trim();
+    await updateDoc(doc(db, ...f._path), {
+      date: date || null,
+      time: time || null,
+      status,
+      ...(venueValue && { venue: venueValue }),
+    });
+    closeDetails();
   };
 
-  /* ---- compute disabled venues (same date) for venue modal ---- */
-  const venuesInUseForDate = useMemo(() => {
-    if (!modal.open || modal.mode !== "venue" || !modal.fixture) return new Set();
-    const d = modal.fixture.date;
-    const currentId = modal.fixture.id;
-    return new Set(
-      fixtures
-        .filter((f) => f.date === d && f.id !== currentId)
-        .map((f) => String(firstDefined(f.venue, f.ground, "")).trim())
-        .filter(Boolean)
-    );
-  }, [modal.open, modal.mode, modal.fixture, fixtures]);
-
+  /* ---------- UI ---------- */
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white">
-      {/* top bar */}
-      <header className="sticky top-0 z-40 bg-slate-900/95 backdrop-blur border-b border-slate-800">
-        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
-          <h1 className="text-2xl md:text-3xl font-extrabold tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-blue-500 via-cyan-400 to-green-400">
-            SAPKOTIX
-          </h1>
+    <div className="min-h-screen bg-gradient-to-br from-[#0a0f16] via-[#0d111a] to-[#0a0f16] text-slate-100 relative overflow-hidden">
+      {/* background glow */}
+      <div className="absolute inset-0 pointer-events-none">
+        <div className="absolute -top-20 -left-20 w-96 h-96 bg-gradient-to-br from-[#00f6a3]/10 to-[#00d0ff]/10 rounded-full blur-3xl"></div>
+        <div className="absolute bottom-0 right-0 w-[30rem] h-[30rem] bg-gradient-to-tr from-[#00d0ff]/10 to-[#00f6a3]/10 rounded-full blur-3xl"></div>
+      </div>
+
+      {/* header */}
+      <header className="sticky top-0 z-40 bg-[#111827]/80 backdrop-blur-md border-b border-[#00f6a3]/10">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex flex-row-reverse">
           <button
             onClick={() => signOut(auth)}
-            className="px-3 py-1.5 text-sm rounded-lg bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 ring-1 ring-slate-700"
+            className="px-3 py-1.5 text-sm rounded-lg bg-gradient-to-r from-[#00f6a3] to-[#00d0ff] text-[#0a0f16] font-semibold hover:brightness-110 shadow-[0_0_8px_rgba(0,255,200,0.3)] transition"
           >
             Logout
           </button>
@@ -312,372 +281,274 @@ export default function OfficialHomePage() {
       </header>
 
       {/* main */}
-      <main className={`max-w-6xl mx-auto px-4 py-8 ${modal.open ? "blur-sm" : ""}`}>
-        {/* UPCOMING (grouped by round) */}
-        <SectionCard title="Your Fixtures" className="space-y-5">
-          {upcomingByRound.length === 0 ? (
-            <EmptyRow text="No upcoming fixtures." />
-          ) : (
-            upcomingByRound.map(([roundKey, list]) => (
-              <RoundCard
-                key={`up-r-${roundKey}`}
-                title={`Round ${roundKey}`}
-                count={list.length}
-              >
-                {list.map((f) => (
-                  <FixtureRow
-                    key={f.id}
-                    f={f}
-                    clubName={clubName}
-                    clubLogo={clubLogo}
-                    showScore={false}
-                    primaryLabel="Update Score"
-                    onPrimary={() => openConfirm(f)}
-                    secondaryLabel="Change Venue"
-                    onSecondary={() => openVenue(f)}
-                  />
-                ))}
-              </RoundCard>
-            ))
-          )}
-        </SectionCard>
-
-        {/* PAST (grouped by round) */}
-        <SectionCard title="Past Fixtures" className="mt-6 space-y-5">
-          {pastByRound.length === 0 ? (
-            <EmptyRow text="No past fixtures yet." />
-          ) : (
-            pastByRound.map(([roundKey, list]) => (
-              <RoundCard
-                key={`past-r-${roundKey}`}
-                title={`Round ${roundKey}`}
-                count={list.length}
-              >
-                {list.map((f) => (
-                  <FixtureRow
-                    key={f.id}
-                    f={f}
-                    clubName={clubName}
-                    clubLogo={clubLogo}
-                    showScore
-                    primaryLabel="Edit Score"
-                    onPrimary={() => openEdit(f)}
-                  />
-                ))}
-              </RoundCard>
-            ))
-          )}
-        </SectionCard>
+      <main className="relative z-10 max-w-6xl mx-auto px-4 py-10 space-y-10">
+        <SectionCard
+          title="Upcoming Fixtures"
+          group={upGrouped}
+          roundKeys={upRoundKeys}
+          clubMap={clubMap}
+          showScore={false}
+          onEdit={openEdit}
+          onConfirm={openConfirm}
+          onDetails={openDetails}
+          needsScore={needsScore}
+        />
+        <SectionCard
+          title="Past Fixtures"
+          group={pastGrouped}
+          roundKeys={pastRoundKeys}
+          clubMap={clubMap}
+          showScore
+          onEdit={openEdit}
+          onConfirm={openConfirm}
+          onDetails={openDetails}
+          needsScore={needsScore}
+        />
       </main>
 
-      {/* MODAL */}
+      {/* Modals */}
       {modal.open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-slate-800 w-full max-w-md rounded-2xl p-6 shadow-xl ring-1 ring-slate-700">
-            {/* Confirm -> Edit score prompt */}
-            {modal.mode === "confirm" && (
-              <>
-                <h3 className="text-lg font-semibold text-blue-400 mb-2">
-                  Is this game finished?
-                </h3>
-                <p className="text-slate-300 mb-6">
-                  {clubName(modal.fixture?.clubIds?.[0])} vs{" "}
-                  {clubName(modal.fixture?.clubIds?.[1])} — Round{" "}
-                  {modal.fixture?.roundNumber}
-                </p>
-                <div className="flex gap-3 justify-end">
-                  <button
-                    onClick={() => setModal((m) => ({ ...m, mode: "edit" }))}
-                    className="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded font-medium"
-                  >
-                    Yes, enter score
-                  </button>
-                  <button
-                    onClick={closeModal}
-                    className="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded font-medium"
-                  >
-                    No
-                  </button>
-                </div>
-              </>
-            )}
-
-            {/* Edit final score */}
-            {modal.mode === "edit" && (
-              <>
-                <h3 className="text-lg font-semibold text-blue-400 mb-2">
-                  Enter final score
-                </h3>
-                <p className="text-slate-300 mb-4">
-                  {clubName(modal.fixture?.clubIds?.[0])} vs{" "}
-                  {clubName(modal.fixture?.clubIds?.[1])} — Round{" "}
-                  {modal.fixture?.roundNumber}
-                </p>
-                <div className="flex justify-center gap-4 mb-6">
-                  <input
-                    type="number"
-                    className="bg-slate-700 p-2 rounded w-24 text-center"
-                    value={modal.scoreA}
-                    onChange={(e) =>
-                      setModal((m) => ({ ...m, scoreA: e.target.value }))
-                    }
-                    placeholder="Team A"
-                  />
-                  <span className="self-center text-slate-400 font-semibold">–</span>
-                  <input
-                    type="number"
-                    className="bg-slate-700 p-2 rounded w-24 text-center"
-                    value={modal.scoreB}
-                    onChange={(e) =>
-                      setModal((m) => ({ ...m, scoreB: e.target.value }))
-                    }
-                    placeholder="Team B"
-                  />
-                </div>
-                <div className="flex justify-end gap-3">
-                  <button
-                    onClick={saveScores}
-                    className="bg-green-600 hover:bg-green-700 px-5 py-2 rounded font-medium"
-                  >
-                    Save
-                  </button>
-                  <button
-                    onClick={closeModal}
-                    className="bg-red-600 hover:bg-red-700 px-5 py-2 rounded font-medium"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </>
-            )}
-
-            {/* Change venue (with select + “Other…”) */}
-            {modal.mode === "venue" && (
-              <>
-                <h3 className="text-lg font-semibold text-blue-400 mb-2">
-                  Change venue
-                </h3>
-                <p className="text-slate-300 mb-4">
-                  {clubName(modal.fixture?.clubIds?.[0])} vs{" "}
-                  {clubName(modal.fixture?.clubIds?.[1])} — Round{" "}
-                  {modal.fixture?.roundNumber}
-                  <br />
-                  <span className="text-slate-400 text-sm">
-                    Date: {modal.fixture?.date ?? "TBA"}
-                  </span>
-                </p>
-
-                <label className="block text-sm text-slate-300 mb-2">Venue</label>
-                <select
-                  className="w-full bg-slate-700 p-2 rounded mb-3 ring-1 ring-slate-600"
-                  value={modal.selectedVenue}
-                  onChange={(e) =>
-                    setModal((m) => ({ ...m, selectedVenue: e.target.value }))
-                  }
+        <Modal onClose={closeModal}>
+          {modal.mode === "confirm" ? (
+            <div className="text-center space-y-5">
+              <h3 className="text-lg font-semibold text-emerald-400">
+                Confirm Match Completion
+              </h3>
+              <p className="text-slate-300">
+                {clubName(modal.fixture?.clubIds?.[0])} vs{" "}
+                {clubName(modal.fixture?.clubIds?.[1])}
+              </p>
+              <div className="flex justify-center gap-3">
+                <button
+                  onClick={() => setModal({ ...modal, mode: "edit" })}
+                  className="px-4 py-2 rounded bg-gradient-to-r from-[#00f6a3] to-[#00d0ff] text-[#0a0f16] font-semibold hover:brightness-110"
                 >
-                  <option value="" disabled>
-                    Select a venue
-                  </option>
-                  {venueOptions.map((v) => {
-                    const used = venuesInUseForDate.has(String(v).trim());
-                    return (
-                      <option key={v} value={v} disabled={used}>
-                        {v} {used ? "— (in use this date)" : ""}
-                      </option>
-                    );
-                  })}
-                  <option value="other">Other…</option>
-                </select>
+                  Enter Score
+                </button>
+                <button
+                  onClick={closeModal}
+                  className="px-4 py-2 rounded bg-[#1f2937] text-slate-200 hover:bg-[#273548]"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="space-y-5">
+              <h3 className="text-lg font-semibold text-emerald-400 text-center">
+                Enter Final Score
+              </h3>
+              <div className="flex justify-center gap-4">
+                <input
+                  ref={scoreARef}
+                  type="number"
+                  value={modal.scoreA}
+                  onChange={(e) =>
+                    setModal({ ...modal, scoreA: e.target.value })
+                  }
+                  className="w-20 text-center rounded bg-[#1a2433]/70 text-slate-100 focus:ring-2 focus:ring-[#00f6a3] outline-none"
+                />
+                <span className="self-center text-xl font-bold">–</span>
+                <input
+                  type="number"
+                  value={modal.scoreB}
+                  onChange={(e) =>
+                    setModal({ ...modal, scoreB: e.target.value })
+                  }
+                  className="w-20 text-center rounded bg-[#1a2433]/70 text-slate-100 focus:ring-2 focus:ring-[#00d0ff] outline-none"
+                />
+              </div>
+              <div className="flex justify-end gap-3">
+                <button
+                  onClick={saveScores}
+                  className="px-5 py-2 rounded bg-gradient-to-r from-[#00f6a3] to-[#00d0ff] text-[#0a0f16] font-semibold"
+                >
+                  Save
+                </button>
+                <button
+                  onClick={closeModal}
+                  className="px-5 py-2 rounded bg-[#1f2937] text-slate-200 hover:bg-[#273548]"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </Modal>
+      )}
 
-                {modal.selectedVenue === "other" && (
-                  <>
-                    <label className="block text-sm text-slate-300 mb-2">
-                      Enter custom venue
-                    </label>
-                    <input
-                      type="text"
-                      className="w-full bg-slate-700 p-2 rounded ring-1 ring-slate-600"
-                      placeholder="e.g., Riverside Stadium"
-                      value={modal.venue}
-                      onChange={(e) =>
-                        setModal((m) => ({ ...m, venue: e.target.value }))
-                      }
-                    />
-                  </>
-                )}
-
-                <div className="mt-6 flex justify-end gap-3">
-                  <button
-                    onClick={saveVenue}
-                    className="bg-blue-600 hover:bg-blue-700 px-5 py-2 rounded font-medium"
-                  >
-                    Save
-                  </button>
-                  <button
-                    onClick={closeModal}
-                    className="bg-slate-700 hover:bg-slate-600 px-5 py-2 rounded font-medium"
-                  >
-                    Cancel
-                  </button>
-                </div>
-              </>
+      {details.open && (
+        <Modal onClose={closeDetails}>
+          <div className="space-y-4">
+            <h3 className="text-lg font-semibold text-cyan-400 text-center">
+              Edit Match Details
+            </h3>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <input
+                type="date"
+                value={details.date}
+                onChange={(e) => setDetails({ ...details, date: e.target.value })}
+                className="bg-[#1a2433]/70 rounded px-3 py-2 text-sm text-slate-200 focus:ring-2 focus:ring-[#00f6a3] outline-none"
+              />
+              <input
+                type="time"
+                value={details.time}
+                onChange={(e) => setDetails({ ...details, time: e.target.value })}
+                className="bg-[#1a2433]/70 rounded px-3 py-2 text-sm text-slate-200 focus:ring-2 focus:ring-[#00d0ff] outline-none"
+              />
+            </div>
+            <select
+              value={details.status}
+              onChange={(e) => setDetails({ ...details, status: e.target.value })}
+              className="w-full bg-[#1a2433]/70 rounded px-3 py-2 text-sm text-slate-200 focus:ring-2 focus:ring-[#00f6a3]"
+            >
+              <option value="scheduled">Scheduled</option>
+              <option value="postponed">Postponed</option>
+              <option value="finished">Finished</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+            <select
+              value={details.chosenVenue}
+              onChange={(e) => setDetails({ ...details, chosenVenue: e.target.value })}
+              className="w-full bg-[#1a2433]/70 rounded px-3 py-2 text-sm text-slate-200 focus:ring-2 focus:ring-[#00d0ff]"
+            >
+              <option value="">Select Venue</option>
+              {venues.map((v) => (
+                <option key={v}>{v}</option>
+              ))}
+              <option value="___OTHER___">Other...</option>
+            </select>
+            {details.chosenVenue === "___OTHER___" && (
+              <input
+                type="text"
+                value={details.customVenue}
+                onChange={(e) =>
+                  setDetails({ ...details, customVenue: e.target.value })
+                }
+                placeholder="Enter custom venue"
+                className="w-full bg-[#1a2433]/70 rounded px-3 py-2 text-sm text-slate-200 focus:ring-2 focus:ring-[#00f6a3] outline-none"
+              />
             )}
+            <div className="flex justify-end gap-3 pt-2">
+              <button
+                onClick={saveDetails}
+                className="px-5 py-2 rounded bg-gradient-to-r from-[#00f6a3] to-[#00d0ff] text-[#0a0f16] font-semibold"
+              >
+                Save
+              </button>
+              <button
+                onClick={closeDetails}
+                className="px-5 py-2 rounded bg-[#1f2937] text-slate-200 hover:bg-[#273548]"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   );
 }
 
-/* --------------------- PRESENTATIONAL PARTS --------------------- */
-
-function SectionCard({ title, children, className = "" }) {
+/* ---------- subcomponents ---------- */
+function SectionCard({ title, group, roundKeys, clubMap, showScore, onEdit, onConfirm, onDetails, needsScore }) {
   return (
-    <section className={`max-w-4xl mx-auto bg-slate-800/60 rounded-3xl ring-1 ring-slate-700 p-5 md:p-6 shadow-lg ${className}`}>
-      <div className="mb-3 flex items-center justify-between">
-        <h2 className="text-xl font-bold text-blue-400">{title}</h2>
-      </div>
-      {children}
+    <section className="bg-[#111827]/60 backdrop-blur-lg ring-1 ring-[#00d0ff]/10 rounded-3xl shadow-[0_0_20px_rgba(0,255,200,0.05)] p-6">
+      <h2 className="text-2xl font-extrabold mb-6 bg-gradient-to-r from-[#00f6a3] to-[#00d0ff] bg-clip-text text-transparent">
+        {title}
+      </h2>
+      {roundKeys.length === 0 ? (
+        <p className="text-slate-400 text-center py-6">No fixtures yet.</p>
+      ) : (
+        <div className="space-y-8">
+          {roundKeys.map((key) => (
+            <div key={key}>
+              <h3 className="text-lg font-semibold text-cyan-300 mb-3">
+                Round {key}
+              </h3>
+              <ul className="space-y-4">
+                {group.get(key)?.map((f) => (
+                  <FixtureRow
+                    key={f.id}
+                    f={f}
+                    clubMap={clubMap}
+                    showScore={showScore}
+                    needsScore={needsScore?.(f)}
+                    onEnterScore={() => onEdit(f)}
+                    onConfirmFinished={() => onConfirm(f)}
+                    onChangeDetails={() => onDetails(f)}
+                    onEditScore={() => onEdit(f)}
+                  />
+                ))}
+              </ul>
+            </div>
+          ))}
+        </div>
+      )}
     </section>
   );
 }
 
-function RoundCard({ title, count, children }) {
+function Modal({ children, onClose }) {
   return (
-    <div className="bg-slate-900/55 rounded-2xl ring-1 ring-slate-800 p-4 md:p-5">
-      <div className="mb-3 flex items-center justify-between">
-        <h3 className="font-semibold">{title}</h3>
-        <span className="text-xs text-slate-400">{count} match(es)</span>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+      <div className="bg-[#111827] w-full max-w-md rounded-2xl p-6 shadow-[0_0_25px_rgba(0,255,200,0.1)] ring-1 ring-[#00f6a3]/10 relative">
+        <button
+          onClick={onClose}
+          className="absolute top-3 right-4 text-slate-400 hover:text-white text-lg font-bold"
+        >
+          ×
+        </button>
+        {children}
       </div>
-      <div className="space-y-4">{children}</div>
     </div>
   );
 }
 
-function EmptyRow({ text }) {
+function FixtureRow({ f, clubMap, showScore, needsScore, onEnterScore, onConfirmFinished, onEditScore, onChangeDetails }) {
+  const [home, away] = f.clubIds ?? [];
+  const homeClub = clubMap[norm(home)] || {};
+  const awayClub = clubMap[norm(away)] || {};
+  const scored = showScore && Number.isFinite(f.scoreA) && Number.isFinite(f.scoreB);
+  const score = scored ? `${f.scoreA}–${f.scoreB}` : null;
   return (
-    <div className="rounded-2xl bg-slate-900/50 ring-1 ring-slate-800 p-4 text-slate-400">
-      {text}
-    </div>
-  );
-}
-
-function TeamSide({ name, logoURL, align = "left" }) {
-  return (
-    <div className={`min-w-0 inline-flex items-center gap-3 ${align === "right" ? "justify-end text-right" : ""}`}>
-      {align !== "right" && (
-        <img
-          src={logoURL || ""}
-          alt={name}
-          className={`w-10 h-10 rounded-full object-contain bg-slate-700/40 ring-1 ring-slate-700 ${logoURL ? "" : "opacity-0"}`}
-          onError={(e) => (e.currentTarget.style.display = "none")}
-        />
-      )}
-      <div className="font-semibold truncate max-w-[220px] md:max-w-[320px]">{name}</div>
-      {align === "right" && (
-        <img
-          src={logoURL || ""}
-          alt={name}
-          className={`w-10 h-10 rounded-full object-contain bg-slate-700/40 ring-1 ring-slate-700 ${logoURL ? "" : "opacity-0"}`}
-          onError={(e) => (e.currentTarget.style.display = "none")}
-        />
-      )}
-    </div>
-  );
-}
-
-function RoundPill({ children }) {
-  return (
-    <span className="px-3 py-1 text-[11px] font-semibold rounded-full bg-slate-700 text-slate-200 ring-1 ring-slate-600 whitespace-nowrap">
-      {children}
-    </span>
-  );
-}
-
-/** Fixture row with aligned spacing */
-function FixtureRow({
-  f,
-  clubName,
-  clubLogo,
-  showScore,
-  primaryLabel,
-  onPrimary,
-  secondaryLabel,
-  onSecondary,
-}) {
-  const [homeId, awayId] = f.clubIds ?? [];
-  const home = { name: clubName(homeId), logoURL: clubLogo(homeId) };
-  const away = { name: clubName(awayId), logoURL: clubLogo(awayId) };
-
-  const score =
-    showScore && Number.isFinite(f.scoreA) && Number.isFinite(f.scoreB)
-      ? { a: f.scoreA, b: f.scoreB }
-      : null;
-
-  return (
-    <div className="rounded-2xl bg-slate-900/60 ring-1 ring-slate-800 p-4 md:p-5">
-      <div className="grid [grid-template-columns:140px_1fr_260px] items-center gap-4 md:gap-6">
-        {/* DATE */}
-        <div className="w-[140px]">
-          <div className="text-[10px] uppercase tracking-wide text-slate-400">Date</div>
-          <div className="font-semibold leading-tight">
-            {f.date || "TBA"}
-            {f.time ? (
-              <>
-                <br />
-                <span className="text-slate-300">{f.time}</span>
-              </>
-            ) : null}
-          </div>
+    <li className="rounded-2xl bg-[#0e1520]/70 ring-1 ring-[#00f6a3]/10 p-5 flex flex-col items-center text-center gap-4">
+      <div className="text-sm text-slate-400">
+        {f.date || "TBA"} {f.time && `• ${f.time}`}
+      </div>
+      <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 w-full max-w-3xl">
+        <Team name={homeClub.name} logoURL={homeClub.logoURL} />
+        <div className="text-2xl font-bold">{score || "vs"}</div>
+        <Team name={awayClub.name} logoURL={awayClub.logoURL} align="right" />
+      </div>
+      {f.venue && (
+        <div className="flex items-center gap-2 text-slate-400 text-sm">
+          <Pin className="text-slate-500" /> {f.venue}
         </div>
-
-        {/* TEAMS + SCORE + VENUE */}
-        <div className="min-w-0">
-          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3">
-            <div className="min-w-0 justify-self-end">
-              <TeamSide name={home.name} logoURL={home.logoURL} />
-            </div>
-            <div className="justify-self-center text-center px-2">
-              {score ? (
-                <div className="text-lg md:text-xl font-extrabold leading-none">
-                  {score.a} <span className="text-slate-400">–</span> {score.b}
-                </div>
-              ) : (
-                <div className="text-slate-400 font-semibold leading-none">vs.</div>
-              )}
-            </div>
-            <div className="min-w-0 justify-self-start">
-              <TeamSide name={away.name} logoURL={away.logoURL} align="right" />
-            </div>
-          </div>
-
-          {(f.venue || f.ground) && (
-            <div className="mt-2 flex justify-self-center items-center gap-2 text-sm text-slate-400">
-              <Pin className="text-slate-500" />
-              <span className="truncate">{f.venue || f.ground}</span>
-            </div>
-          )}
-        </div>
-
-        {/* RIGHT CONTROLS */}
-        <div className="w-[260px] flex items-center justify-end gap-3">
-          <RoundPill>ROUND {f.roundNumber ?? "?"}</RoundPill>
-          {secondaryLabel && onSecondary && (
-            <button
-              onClick={onSecondary}
-              className="px-3 md:px-3.5 py-2 rounded-xl font-medium bg-slate-700 hover:bg-slate-600 text-slate-100 ring-1 ring-slate-600"
-            >
-              {secondaryLabel}
-            </button>
-          )}
+      )}
+      <div className="flex flex-wrap justify-center gap-2">
+        <button
+          onClick={onChangeDetails}
+          className="px-4 py-2 rounded bg-[#1f2937] hover:bg-[#273548] text-slate-200"
+        >
+          Change Details
+        </button>
+        {showScore ? (
           <button
-            onClick={onPrimary}
-            className="px-3 md:px-4 py-2 rounded-xl font-medium bg-blue-600 hover:bg-blue-700 text-white ring-1 ring-blue-500/40"
+            onClick={onEditScore}
+            className="px-4 py-2 rounded bg-gradient-to-r from-[#00f6a3] to-[#00d0ff] text-[#0a0f16] font-semibold"
           >
-            {primaryLabel}
+            Update Score
           </button>
-        </div>
+        ) : (
+          <button
+            onClick={needsScore ? onEnterScore : onConfirmFinished}
+            className="px-4 py-2 rounded bg-gradient-to-r from-[#00f6a3] to-[#00d0ff] text-[#0a0f16] font-semibold"
+          >
+            {needsScore ? "Enter Score" : "Mark Finished"}
+          </button>
+        )}
       </div>
-    </div>
+    </li>
   );
 }

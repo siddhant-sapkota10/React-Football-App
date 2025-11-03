@@ -1,4 +1,4 @@
-// src/pages/GuestHomePage.jsx
+// src/pages/Guest/GuestHomePage.jsx
 import { useEffect, useMemo, useState } from "react";
 import { db } from "../../firebase";
 import { collection, getDocs, orderBy, query } from "firebase/firestore";
@@ -11,7 +11,6 @@ const GROUP_ID = "groupA-2025";
 const norm = (s) => (s ? String(s).trim().toLowerCase() : "");
 const cap = (s) =>
   typeof s === "string" && s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
-
 const firstDefined = (...xs) =>
   xs.find((x) => x !== undefined && x !== null && x !== "");
 
@@ -20,8 +19,7 @@ const sanitizeUrl = (u) => {
   const raw = u.trim();
   try {
     const url = new URL(raw, window.location.origin);
-    const isDrive = /(^|\.)drive\.google\.com$/.test(url.hostname);
-    if (isDrive) {
+    if (/drive\.google\.com/i.test(url.hostname)) {
       const id = raw.match(/\/file\/d\/([^/]+)/)?.[1] || url.searchParams.get("id");
       if (id) return `https://drive.google.com/uc?export=view&id=${id}`;
     }
@@ -31,17 +29,12 @@ const sanitizeUrl = (u) => {
   return raw;
 };
 
-/** Build a sortable Date from string date "YYYY-MM-DD" and optional time "HH:MM" */
 const asDate = (d, t) =>
   new Date(`${String(d || "9999-12-31")}T${String(t || "00:00")}:00`);
-
-/** Stable chronological sort (earliest → latest) */
-// Stable chronological sort (earliest → latest)
 const sortByDateTime = (arr = []) =>
   (Array.isArray(arr) ? [...arr] : []).sort(
     (a, b) => asDate(a?.date, a?.time) - asDate(b?.date, b?.time)
   );
-
 
 const Pin = (props) => (
   <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor" {...props}>
@@ -49,131 +42,73 @@ const Pin = (props) => (
   </svg>
 );
 
-function Initials({ name }) {
-  const letters = (name || "")
+function Team({ name, logoURL, align = "left" }) {
+  const fallback = (name || "?")
     .split(" ")
     .filter(Boolean)
     .slice(0, 2)
     .map((w) => w[0]?.toUpperCase())
     .join("");
-  return (
-    <div className="w-10 h-10 rounded-full bg-slate-700/40 ring-1 ring-slate-700 flex items-center justify-center text-sm font-semibold text-slate-300">
-      {letters || "?"}
-    </div>
-  );
-}
-
-function Team({ name, logoURL, align = "left" }) {
-  const Img = () =>
-    logoURL ? (
-      <img
-        src={logoURL}
-        alt={name || "Club logo"}
-        className="w-10 h-10 rounded-full object-contain bg-slate-700/40 ring-1 ring-slate-700 shrink-0"
-        loading="lazy"
-        onError={(e) => {
-          e.currentTarget.style.display = "none";
-          const sib = e.currentTarget.nextElementSibling;
-          if (sib && sib.dataset.fallback === "true") sib.style.display = "flex";
-        }}
-      />
-    ) : null;
-
-  const Fallback = () => (
-    <div data-fallback="true" style={{ display: logoURL ? "none" : "flex" }}>
-      <Initials name={name} />
-    </div>
-  );
 
   return (
     <div
-      className={`min-w-0 inline-flex items-center gap-3 ${
+      className={`inline-flex items-center gap-3 ${
         align === "right" ? "justify-end text-right" : ""
       }`}
     >
       {align !== "right" && (
-        <>
-          <Img />
-          <Fallback />
-        </>
+        <img
+          src={logoURL}
+          alt={name}
+          className="w-9 h-9 rounded-full object-contain bg-[#101822]/60 ring-1 ring-[#00d0ff]/20"
+          onError={(e) => (e.currentTarget.style.display = "none")}
+        />
       )}
-      <div className="font-semibold truncate max-w-[180px] sm:max-w-[220px] md:max-w-[320px]">
+      {!logoURL && (
+        <div className="w-9 h-9 rounded-full bg-[#14202f]/60 ring-1 ring-[#00f6a3]/20 flex items-center justify-center text-xs font-semibold text-emerald-300">
+          {fallback}
+        </div>
+      )}
+      <span className="truncate font-semibold text-slate-100 max-w-[160px] sm:max-w-[220px] md:max-w-[300px]">
         {name}
-      </div>
+      </span>
       {align === "right" && (
-        <>
-          <Img />
-          <Fallback />
-        </>
+        <img
+          src={logoURL}
+          alt={name}
+          className="w-9 h-9 rounded-full object-contain bg-[#101822]/60 ring-1 ring-[#00d0ff]/20"
+          onError={(e) => (e.currentTarget.style.display = "none")}
+        />
       )}
     </div>
   );
 }
 
 function FixtureRow({ f, clubMap }) {
-  const [homeIdRaw, awayIdRaw] = f.clubIds ?? [];
-  const homeClub = clubMap[norm(homeIdRaw)] || { name: homeIdRaw, logoURL: "" };
-  const awayClub = clubMap[norm(awayIdRaw)] || { name: awayIdRaw, logoURL: "" };
-  const homeName = cap(homeClub.name);
-  const awayName = cap(awayClub.name);
-
-  const finished =
-    f.status === "finished" ||
-    (typeof f.scoreA === "number" && typeof f.scoreB === "number");
-
-  const score =
-    finished && Number.isFinite(f.scoreA) && Number.isFinite(f.scoreB)
-      ? `${f.scoreA}–${f.scoreB}`
-      : null;
+  const [homeRaw, awayRaw] = f.clubIds ?? [];
+  const homeClub = clubMap[norm(homeRaw)] || { name: homeRaw, logoURL: "" };
+  const awayClub = clubMap[norm(awayRaw)] || { name: awayRaw, logoURL: "" };
+  const status = String(f.status || "").toLowerCase();
+  const hasScores = Number.isFinite(f.scoreA) && Number.isFinite(f.scoreB);
+  const score = hasScores ? `${f.scoreA}–${f.scoreB}` : null;
 
   return (
-    <li className="rounded-2xl bg-slate-900/60 ring-1 ring-slate-800 p-4 md:p-5">
-      <div className="flex flex-col gap-4 md:flex-row md:items-center md:gap-6">
-        {/* Date */}
-        <div className="md:w-36">
-          <div className="text-xs uppercase tracking-wide text-slate-400">Date</div>
-          <div className="font-semibold">
-            {String(f.date)}
-            {f.time ? ` • ${f.time}` : ""}
-          </div>
-        </div>
-
-        {/* Teams + Ground */}
-        <div className="flex-1">
-          <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-3 w-full">
-            <div className="min-w-0 justify-self-end">
-              <Team name={homeName} logoURL={homeClub.logoURL} />
-            </div>
-
-            <div className="justify-self-center text-center px-2">
-              {score ? (
-                <div className="text-lg font-extrabold leading-none">{score}</div>
-              ) : (
-                <div className="text-slate-400 font-semibold leading-none">
-                  {f.status === "scheduled" ? "vs." : cap(f.status + " (scores TBA)")}
-                </div>
-              )}
-            </div>
-
-            <div className="min-w-0 justify-self-start">
-              <Team name={awayName} logoURL={awayClub.logoURL} align="right" />
-            </div>
-          </div>
-
-          {(f.venue || f.ground) && (
-            <div className="mt-2 flex items-center justify-center gap-2 text-sm text-slate-400">
-              <Pin className="text-slate-500" />
-              <span>{f.venue || f.ground}</span>
-            </div>
-          )}
-        </div>
-
-        {/* Round */}
-        <div className="md:w-24 text-right">
-          <div className="text-xs uppercase tracking-wide text-slate-400">Round</div>
-          <div className="font-semibold">{f.roundNumber ?? "-"}</div>
-        </div>
+    <li className="rounded-2xl bg-[#0e1520]/70 ring-1 ring-[#00f6a3]/10 p-5 flex flex-col items-center text-center gap-3">
+      <div className="text-sm text-slate-400">
+        {f.date || "TBA"} {f.time && `• ${f.time}`}
       </div>
+
+      <div className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-4 w-full max-w-3xl">
+        <Team name={cap(homeClub.name)} logoURL={homeClub.logoURL} />
+        <div className="text-xl font-bold text-slate-100">{score || "vs"}</div>
+        <Team name={cap(awayClub.name)} logoURL={awayClub.logoURL} align="right" />
+      </div>
+
+      {(f.venue || f.ground) && (
+        <div className="flex items-center gap-2 text-slate-400 text-sm">
+          <Pin className="text-slate-500" /> {f.venue || f.ground}
+        </div>
+      )}
     </li>
   );
 }
@@ -184,11 +119,9 @@ export default function GuestHomePage() {
   const [clubMap, setClubMap] = useState({});
   const [fixtures, setFixtures] = useState([]);
   const [loading, setLoading] = useState(true);
-
   const [clubFilter, setClubFilter] = useState("all");
   const [roundFilter, setRoundFilter] = useState("all");
 
-  // clubs
   useEffect(() => {
     (async () => {
       const snap = await getDocs(collection(db, "clubs"));
@@ -218,18 +151,14 @@ export default function GuestHomePage() {
     })();
   }, []);
 
-  // fixtures from group
   useEffect(() => {
     (async () => {
       setLoading(true);
       try {
-        const q = query(
-          collection(db, `groups/${GROUP_ID}/fixtures`),
-          orderBy("roundNumber", "asc")
-        );
-        const snap = await getDocs(q);
+        const qy = query(collection(db, `groups/${GROUP_ID}/fixtures`), orderBy("roundNumber", "asc"));
+        const snap = await getDocs(qy);
         const raw = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-        setFixtures(sortByDateTime(raw)); // <— ensure true chronological order
+        setFixtures(sortByDateTime(raw));
       } finally {
         setLoading(false);
       }
@@ -238,24 +167,16 @@ export default function GuestHomePage() {
 
   const clubOptions = useMemo(() => {
     const ids = Object.keys(clubMap);
-    if (ids.length) {
-      return ids
-        .map((id) => ({ id, label: cap(clubMap[id].name) }))
-        .sort((a, b) => a.label.localeCompare(b.label));
-    }
+    if (ids.length)
+      return ids.map((id) => ({ id, label: cap(clubMap[id].name) })).sort((a, b) => a.label.localeCompare(b.label));
     const set = new Set();
     fixtures.forEach((f) => (f.clubIds || []).forEach((cid) => set.add(norm(cid))));
-    return [...set]
-      .map((id) => ({ id, label: cap(id) }))
-      .sort((a, b) => a.label.localeCompare(b.label));
+    return [...set].map((id) => ({ id, label: cap(id) })).sort((a, b) => a.label.localeCompare(b.label));
   }, [clubMap, fixtures]);
 
   const roundOptions = useMemo(() => {
     const rounds = new Set();
-    fixtures.forEach((f) => {
-      if (f.roundNumber !== undefined && f.roundNumber !== null)
-        rounds.add(Number(f.roundNumber));
-    });
+    fixtures.forEach((f) => f.roundNumber != null && rounds.add(Number(f.roundNumber)));
     return [...rounds].sort((a, b) => a - b);
   }, [fixtures]);
 
@@ -273,131 +194,104 @@ export default function GuestHomePage() {
     });
   }, [fixtures, clubFilter, roundFilter]);
 
-  // Group by round, but keep each round section chronologically ordered
-const groupedByRound = useMemo(() => {
-  const byRound = new Map();
+  const groupedByRound = useMemo(() => {
+    const map = new Map();
+    for (const f of filteredFixtures) {
+      const key = f.roundNumber ?? "—";
+      const list = map.get(key) ?? [];
+      list.push(f);
+      map.set(key, sortByDateTime(list));
+    }
+    return map;
+  }, [filteredFixtures]);
 
-  for (const f of filteredFixtures) {
-    const key = f.roundNumber ?? "—";
-    const list = byRound.get(key) ?? [];
-    list.push(f);
-    byRound.set(key, list);
-  }
-
-  // ensure each round is sorted by date/time (earliest → latest)
-  for (const [key, list] of byRound.entries()) {
-    byRound.set(key, sortByDateTime(list));
-  }
-  return byRound;
-}, [filteredFixtures]);
-
-
-  const sortedRoundKeys = useMemo(() => {
-    const keys = [...groupedByRound.keys()];
-    return keys.sort((a, b) => Number(a) - Number(b));
-  }, [groupedByRound]);
+  const sortedRoundKeys = useMemo(() => [...groupedByRound.keys()].sort((a, b) => a - b), [groupedByRound]);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-black to-slate-900 text-white">
-      {/* TOP STICKY BAR */}
-      <div className="sticky top-0 z-50 bg-slate-900/95 backdrop-blur border-b border-slate-800">
-        <div className="max-w-6xl mx-auto px-4">
-          <div className="py-3 flex items-center justify-center">
-            <h1 className="text-2xl md:text-3xl font-extrabold tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-blue-500 via-cyan-400 to-green-400">
-              SAPKOTIX
-            </h1>
-          </div>
-        </div>
+    <div className="min-h-screen bg-gradient-to-br from-[#0a0f16] via-[#0d111a] to-[#0a0f16] text-slate-100 relative overflow-hidden">
+      {/* glow bg */}
+      <div className="absolute inset-0 pointer-events-none">
+        <div className="absolute -top-20 -left-20 w-96 h-96 bg-gradient-to-br from-[#00f6a3]/10 to-[#00d0ff]/10 rounded-full blur-3xl"></div>
+        <div className="absolute bottom-0 right-0 w-[30rem] h-[30rem] bg-gradient-to-tr from-[#00d0ff]/10 to-[#00f6a3]/10 rounded-full blur-3xl"></div>
       </div>
 
-      {/* NAV */}
-      <header className="bg-slate-900">
-        <div className="max-w-6xl mx-auto px-4 py-4">
-          <div className="flex items-center justify-center">
-            <nav className="flex items-center gap-1 rounded-xl bg-slate-800/60 p-1 ring-1 ring-slate-700">
-              <button
-                className="px-3 py-1.5 text-sm font-semibold rounded-lg bg-slate-700 text-white"
-                aria-current="page"
-              >
-                Fixtures / Results
-              </button>
-              <button
-                className="px-3 py-1.5 text-sm font-semibold rounded-lg text-slate-300 hover:text-white hover:bg-slate-700/70"
-                onClick={() => navigate("/ladder")}
-              >
-                Ladders
-              </button>
-            </nav>
-          </div>
+      {/* nav */}
+      <header className="sticky top-0 z-40 bg-[#111827]/80 backdrop-blur-md border-b border-[#00f6a3]/10">
+        <div className="max-w-6xl mx-auto px-4 py-4 flex justify-center">
+          <nav className="flex gap-1 bg-[#0f172a]/60 ring-1 ring-[#00d0ff]/20 rounded-xl p-1">
+            <button
+              className="px-4 py-1.5 text-sm rounded-lg bg-gradient-to-r from-[#00f6a3] to-[#00d0ff] text-[#0a0f16] font-semibold shadow-[0_0_10px_rgba(0,255,200,0.2)]"
+              aria-current="page"
+            >
+              Fixtures / Results
+            </button>
+            <button
+              onClick={() => navigate('/ladder')}
+              className="px-4 py-1.5 text-sm rounded-lg text-slate-300 hover:text-white hover:bg-[#00d0ff]/10 transition"
+            >
+              Ladder
+            </button>
+          </nav>
         </div>
       </header>
 
-      {/* MAIN */}
-      <main className="max-w-6xl mx-auto px-4 py-6">
-        {/* Filters */}
-        <div className="max-w-4xl mx-auto mb-4">
-          <div className="flex flex-col sm:flex-row justify-center items-center gap-3">
-            <div className="flex items-center gap-2">
-              <label className="text-sm text-slate-400">Club</label>
-              <select
-                value={clubFilter}
-                onChange={(e) => setClubFilter(e.target.value)}
-                className="bg-slate-800 text-sm rounded-lg px-3 py-2 ring-1 ring-slate-700 focus:outline-none focus:ring-blue-500"
-              >
-                <option value="all">All clubs</option>
-                {clubOptions.map(({ id, label }) => (
-                  <option key={id} value={id}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <label className="text-sm text-slate-400">Round</label>
-              <select
-                value={roundFilter}
-                onChange={(e) => setRoundFilter(e.target.value)}
-                className="bg-slate-800 text-sm rounded-lg px-3 py-2 ring-1 ring-slate-700 focus:outline-none focus:ring-blue-500"
-              >
-                <option value="all">All rounds</option>
-                {roundOptions.map((r) => (
-                  <option key={r} value={String(r)}>
-                    {r}
-                  </option>
-                ))}
-              </select>
-            </div>
+      {/* main */}
+      <main className="relative z-10 max-w-6xl mx-auto px-4 py-8">
+        {/* filters */}
+        <div className="flex flex-wrap justify-center gap-3 mb-6">
+          <div className="flex items-center gap-2 bg-[#0e1520]/70 px-4 py-2 rounded-xl ring-1 ring-[#00f6a3]/10">
+            <label className="text-sm text-slate-400">Club</label>
+            <select
+              value={clubFilter}
+              onChange={(e) => setClubFilter(e.target.value)}
+              className="bg-[#1a2433]/70 rounded-lg text-sm px-3 py-1.5 text-slate-100 focus:ring-2 focus:ring-[#00d0ff] outline-none"
+            >
+              <option value="all">All</option>
+              {clubOptions.map(({ id, label }) => (
+                <option key={id} value={id}>{label}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center gap-2 bg-[#0e1520]/70 px-4 py-2 rounded-xl ring-1 ring-[#00f6a3]/10">
+            <label className="text-sm text-slate-400">Round</label>
+            <select
+              value={roundFilter}
+              onChange={(e) => setRoundFilter(e.target.value)}
+              className="bg-[#1a2433]/70 rounded-lg text-sm px-3 py-1.5 text-slate-100 focus:ring-2 focus:ring-[#00f6a3] outline-none"
+            >
+              <option value="all">All</option>
+              {roundOptions.map((r) => (
+                <option key={r} value={r}>{r}</option>
+              ))}
+            </select>
           </div>
         </div>
 
-        {/* Cards */}
         {loading ? (
-          <div className="max-w-4xl mx-auto bg-slate-800/60 rounded-3xl p-6 shadow-lg ring-1 ring-slate-700">
-            <p className="text-slate-400">Loading…</p>
+          <div className="bg-[#111827]/60 backdrop-blur-lg ring-1 ring-[#00f6a3]/10 rounded-3xl p-6 text-center">
+            <p className="text-slate-400">Loading...</p>
           </div>
         ) : filteredFixtures.length === 0 ? (
-          <div className="max-w-4xl mx-auto bg-slate-800/60 rounded-3xl p-6 shadow-lg ring-1 ring-slate-700">
-            <p className="text-slate-400">No fixtures match your filters.</p>
+          <div className="bg-[#111827]/60 backdrop-blur-lg ring-1 ring-[#00f6a3]/10 rounded-3xl p-6 text-center">
+            <p className="text-slate-400">No fixtures found for selected filters.</p>
           </div>
         ) : (
-          <div className="max-w-4xl mx-auto space-y-6">
-            {sortedRoundKeys.map((roundKey) => (
+          <div className="space-y-8">
+            {sortedRoundKeys.map((key) => (
               <section
-                key={`round-${roundKey}`}
-                className="bg-slate-800/60 rounded-3xl p-6 shadow-lg ring-1 ring-slate-700"
+                key={key}
+                className="bg-[#111827]/60 backdrop-blur-lg ring-1 ring-[#00d0ff]/10 rounded-3xl shadow-[0_0_25px_rgba(0,255,200,0.05)] p-6"
               >
-                <div className="mb-4 flex items-center justify-between">
-                  <h2 className="text-xl font-bold text-blue-400">
-                    {`Round ${roundKey}`}
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xl font-extrabold bg-gradient-to-r from-[#00f6a3] to-[#00d0ff] bg-clip-text text-transparent">
+                    Round {key}
                   </h2>
                   <span className="text-xs text-slate-400">
-                    {groupedByRound.get(roundKey)?.length ?? 0} match(es)
+                    {groupedByRound.get(key)?.length || 0} match(es)
                   </span>
                 </div>
-
                 <ul className="space-y-4">
-                  {groupedByRound.get(roundKey)?.map((f) => (
+                  {groupedByRound.get(key)?.map((f) => (
                     <FixtureRow key={f.id} f={f} clubMap={clubMap} />
                   ))}
                 </ul>
